@@ -1,12 +1,9 @@
 import { fetchQuotes, fetchTimeSales, type TradierQuoteRaw } from "./tradierClient";
 import type { Quote } from "@/types/scanner";
 
-/**
- * Converts raw Tradier quote + timesales data into the Quote shape
- * Oracle and Rubicon engines consume. This is the single translation
- * layer between "what Tradier gives us" and "what our formulas need" —
- * if Tradier's response shape ever changes, only this file changes.
- */
+// Converts raw Tradier quote + timesales data into the Quote shape
+// Oracle and Rubicon engines consume. Session window: 4:00 AM - 8:00 PM ET,
+// matching the actual trading session. Opening range anchors to 4:00 AM.
 
 const DEFAULT_TICK_SIZE = 0.0001; // sub-$1 tick convention; adjust if needed per-symbol
 
