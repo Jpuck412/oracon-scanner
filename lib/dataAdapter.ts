@@ -122,5 +122,3 @@ export async function getQuoteForSymbol(symbol: string): Promise<Quote | null> {
   };
 }
 
-/**
- * B
