@@ -3,22 +3,20 @@ import type { TradierQuote, TradierTimeSaleBar } from "@/types/scanner";
 const TRADIER_BASE_URL =
   process.env.TRADIER_BASE_URL || "https://api.tradier.com/v1";
 
-const TRADIER_ACCESS_TOKEN = process.env.TRADIER_ACCESS_TOKEN;
+const getTradierApiKey = (): string => {
+  const key = process.env.TRADIER_API_KEY;
 
-const requireTradierToken = (): string => {
-  if (!TRADIER_ACCESS_TOKEN) {
-    throw new Error("Missing TRADIER_ACCESS_TOKEN in environment.");
+  if (!key) {
+    throw new Error("Missing TRADIER_API_KEY environment variable.");
   }
 
-  return TRADIER_ACCESS_TOKEN;
+  return key;
 };
 
 const tradierFetch = async <T>(
   path: string,
   params: Record<string, string | number | boolean | undefined> = {}
 ): Promise<T> => {
-  const token = requireTradierToken();
-
   const url = new URL(`${TRADIER_BASE_URL}${path}`);
 
   for (const [key, value] of Object.entries(params)) {
@@ -29,7 +27,7 @@ const tradierFetch = async <T>(
 
   const res = await fetch(url.toString(), {
     headers: {
-      Authorization: `Bearer ${token}`,
+      Authorization: `Bearer ${getTradierApiKey()}`,
       Accept: "application/json"
     },
     cache: "no-store"
@@ -37,7 +35,7 @@ const tradierFetch = async <T>(
 
   if (!res.ok) {
     const text = await res.text();
-    throw new Error(`Tradier ${res.status}: ${text}`);
+    throw new Error(`Tradier API error ${res.status}: ${text}`);
   }
 
   return res.json() as Promise<T>;
@@ -55,7 +53,9 @@ export const getTradierQuotes = async (
     const chunk = symbols.slice(i, i + chunkSize);
 
     const data = await tradierFetch<{
-      quotes?: { quote?: TradierQuote | TradierQuote[] };
+      quotes?: {
+        quote?: TradierQuote | TradierQuote[];
+      };
     }>("/markets/quotes", {
       symbols: chunk.join(","),
       greeks: false
@@ -78,7 +78,9 @@ export const getTradierTimesales = async (
   sessionFilter: "open" | "all" = "open"
 ): Promise<TradierTimeSaleBar[]> => {
   const data = await tradierFetch<{
-    series?: { data?: TradierTimeSaleBar | TradierTimeSaleBar[] };
+    series?: {
+      data?: TradierTimeSaleBar | TradierTimeSaleBar[];
+    };
   }>("/markets/timesales", {
     symbol,
     interval,
