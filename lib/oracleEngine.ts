@@ -1,180 +1,210 @@
-import { clip, clip01, midpoint, spreadPct, spreadMax, openingRangeStats, blendedRVOL, momentum } from "./marketMath";
-import { getMomentumWindow } from "./priceHistory";
-import type { Quote, OracleResult } from "@/types/scanner";
+import { clip, clip01, midpoint, roundPrice, spreadMax, spreadPct } from "@/lib/marketMath";
+import type { Direction, OracleResult } from "@/types/scanner";
 
-const EPSILON = 1e-8;
+export type OracleInput = {
+  bid: number;
+  ask: number;
+  last?: number;
 
-/**
- * Full Oracle Entry Formula implementation — long-only, $0.20-$10.00 universe.
- * Every constant below is labeled and matches the solved formula exactly.
- * Tune values here as live trading data validates/invalidates thresholds.
- */
+  vwap: number;
+  openingRangeHigh: number;
+  openingRangeLow: number;
 
-export async function evaluateOracle(
-  quote: Quote,
-  catalystScore: number
-): Promise<OracleResult> {
-  const reasons: string[] = [];
-  const C = clip01(catalystScore);
+  tickSize?: number;
 
-  const M = midpoint(quote);
-  const SpreadPct = spreadPct(quote);
-  const SpreadMaxVal = spreadMax(M);
+  rvolCumulative: number;
+  rvolOneMinute: number;
 
-  const { width: ORW, mid: ORM, pct: ORPct } = openingRangeStats({
-    orh: quote.orh,
-    orl: quote.orl,
-  });
+  catalystScore: number;
+  mom: number;
 
-  const R = blendedRVOL(quote.rvolCum, quote.rvol1m);
+  direction?: Direction;
+};
 
-  // Momentum requires historical midpoints — if insufficient history, invalid
-  const window = getMomentumWindow(quote.symbol, quote.timestamp);
-  if (!window) {
-    return buildInvalidResult(quote, C, SpreadPct, R, ["Insufficient price history for momentum calculation"]);
-  }
+export const ORACLE_CONST = {
+  VWAP_MIN: 0.0025,
+  VWAP_IDEAL: 0.015,
+  VWAP_MAX_BASE: 0.075,
+  VWAP_MAX_NEWS: 0.025,
 
-  const { mom: Mom, acceleration: A } = momentum({
-    m: M,
-    m1: window.m1,
-    m3: window.m3,
-    m5: window.m5,
-    spreadPctValue: SpreadPct,
-  });
+  ORB_MIN: 0.02,
+  ORB_IDEAL: 0.2,
+  ORB_MAX_BASE: 0.7,
+  ORB_MAX_NEWS: 0.2,
 
-  // STEP 6: catalyst-adjusted thresholds
-  const VWAP_Max = 0.075 + 0.025 * C;
-  const ORB_Max = 0.7 + 0.2 * C;
-  const RVOL_Min = Math.max(1.4, 2.5 * (1 - 0.35 * C));
-  const RVOL_Target = Math.max(RVOL_Min + 0.5, 5.0 * (1 - 0.25 * C));
-  const Mom_Min = 0.35 * (1 - 0.25 * C);
-  const Mom_Target = 1.75 * (1 - 0.15 * C);
-  const RequiredScore = 0.72 - 0.12 * C;
+  RVOL_MIN_BASE: 2.5,
+  RVOL_TARGET_BASE: 5.0,
+  RVOL_FLOOR: 1.4,
 
-  // STEP 7: VWAP distance score
-  const VWAP_Distance = (M - quote.vwap) / quote.vwap;
-  const sVwapLow = clip01((VWAP_Distance - 0.0025) / (0.015 - 0.0025));
-  const sVwapHigh = clip01((VWAP_Max - VWAP_Distance) / (VWAP_Max - 0.015));
-  const S_VWAP = sVwapLow * sVwapHigh;
+  MOM_MIN_BASE: 0.35,
+  MOM_TARGET_BASE: 1.75,
 
-  // STEP 8: ORB breakout score
-  const ORB_Breakout = ORW > EPSILON ? (M - quote.orh) / ORW : 0;
-  const sOrbLow = clip01((ORB_Breakout - 0.02) / (0.2 - 0.02));
-  const sOrbHigh = clip01((ORB_Max - ORB_Breakout) / (ORB_Max - 0.2));
-  const S_ORB = sOrbLow * sOrbHigh;
+  SCORE_MIN_BASE: 0.72,
+  SCORE_NEWS_RELAX: 0.12,
 
-  // STEP 9: RVOL score
-  const S_RVOL = clip01((R - RVOL_Min) / (RVOL_Target - RVOL_Min));
+  OR_PCT_MIN: 0.015,
+  OR_PCT_MAX: 0.18,
 
-  // STEP 10: Momentum score
-  const S_MOM = clip01((Mom - Mom_Min) / (Mom_Target - Mom_Min));
+  BUFFER_TICKS: 2
+} as const;
 
-  // STEP 11: Final Oracle score
-  const OracleScore = 0.26 * S_ORB + 0.22 * S_VWAP + 0.22 * S_RVOL + 0.18 * S_MOM + 0.12 * C;
+export const computeOracle = (x: OracleInput): OracleResult => {
+  const direction = x.direction ?? 1;
+  const tickSize = x.tickSize ?? 0.0001;
+  const catalyst = clip01(x.catalystScore);
 
-  // STEP 12: ORB entry buffer
-  const Theta_ORB = clip(
-    0.08 * (1 - 0.3 * C) * (1 - 0.25 * S_RVOL) * (1 - 0.2 * S_MOM),
+  const mid = midpoint(x.bid, x.ask, x.last);
+  const spr = spreadPct(x.bid, x.ask, mid);
+
+  const orh = x.openingRangeHigh;
+  const orl = x.openingRangeLow;
+  const orw = orh - orl;
+  const orm = (orh + orl) / 2;
+  const orPct = orm > 0 ? orw / orm : 1;
+
+  const blendedRvol = 0.6 * x.rvolCumulative + 0.4 * x.rvolOneMinute;
+
+  const vwapMax =
+    ORACLE_CONST.VWAP_MAX_BASE +
+    ORACLE_CONST.VWAP_MAX_NEWS * catalyst;
+
+  const orbMax =
+    ORACLE_CONST.ORB_MAX_BASE +
+    ORACLE_CONST.ORB_MAX_NEWS * catalyst;
+
+  const rvolMin = Math.max(
+    ORACLE_CONST.RVOL_FLOOR,
+    ORACLE_CONST.RVOL_MIN_BASE * (1 - 0.35 * catalyst)
+  );
+
+  const rvolTarget = Math.max(
+    rvolMin + 0.5,
+    ORACLE_CONST.RVOL_TARGET_BASE * (1 - 0.25 * catalyst)
+  );
+
+  const momMin = ORACLE_CONST.MOM_MIN_BASE * (1 - 0.25 * catalyst);
+  const momTarget = ORACLE_CONST.MOM_TARGET_BASE * (1 - 0.15 * catalyst);
+
+  const vwapDistance = x.vwap > 0 ? direction * ((mid - x.vwap) / x.vwap) : -1;
+
+  const sVwap =
+    clip01((vwapDistance - ORACLE_CONST.VWAP_MIN) / (ORACLE_CONST.VWAP_IDEAL - ORACLE_CONST.VWAP_MIN)) *
+    clip01((vwapMax - vwapDistance) / (vwapMax - ORACLE_CONST.VWAP_IDEAL));
+
+  const orbLevel =
+    ((1 + direction) / 2) * orh +
+    ((1 - direction) / 2) * orl;
+
+  const orbBreakout = orw > 0 ? direction * ((mid - orbLevel) / orw) : -1;
+
+  const sOrb =
+    clip01((orbBreakout - ORACLE_CONST.ORB_MIN) / (ORACLE_CONST.ORB_IDEAL - ORACLE_CONST.ORB_MIN)) *
+    clip01((orbMax - orbBreakout) / (orbMax - ORACLE_CONST.ORB_IDEAL));
+
+  const sRvol = clip01((blendedRvol - rvolMin) / (rvolTarget - rvolMin));
+  const sMom = clip01((x.mom - momMin) / (momTarget - momMin));
+
+  const oracleScore =
+    0.26 * sOrb +
+    0.22 * sVwap +
+    0.22 * sRvol +
+    0.18 * sMom +
+    0.12 * catalyst;
+
+  const requiredScore =
+    ORACLE_CONST.SCORE_MIN_BASE -
+    ORACLE_CONST.SCORE_NEWS_RELAX * catalyst;
+
+  const thetaOrb = clip(
+    0.08 *
+      (1 - 0.3 * catalyst) *
+      (1 - 0.25 * sRvol) *
+      (1 - 0.2 * sMom),
     0.015,
     0.1
   );
-  const ORB_Buffer = Math.max(2 * quote.tick, Theta_ORB * ORW);
 
-  // STEP 13: VWAP entry buffer
-  const Theta_VWAP = 0.003 * (1 - 0.25 * C) * (1 - 0.15 * S_RVOL);
+  const orbBuffer = Math.max(
+    ORACLE_CONST.BUFFER_TICKS * tickSize,
+    thetaOrb * orw
+  );
 
-  // STEP 14: Final entry trigger
-  const ORB_Trigger = quote.orh + ORB_Buffer;
-  const VWAP_Trigger = quote.vwap * (1 + Theta_VWAP);
-  const OracleEntryTrigger = Math.max(ORB_Trigger, VWAP_Trigger);
+  const thetaVwap =
+    0.003 *
+    (1 - 0.25 * catalyst) *
+    (1 - 0.15 * sRvol);
 
-  // STEP 15: Max chase price
-  const ChaseKappa = clip(0.2 + 0.2 * C + 0.15 * S_RVOL + 0.1 * S_MOM, 0.2, 0.6);
-  const MaxEntryPrice = OracleEntryTrigger + ChaseKappa * ORW;
+  const entryTrigger =
+    direction === 1
+      ? Math.max(orh + orbBuffer, x.vwap * (1 + thetaVwap))
+      : Math.min(orl - orbBuffer, x.vwap * (1 - thetaVwap));
 
-  // STEP 16: Invalid conditions
-  if (M < 0.2) reasons.push("Price below $0.20 universe floor");
-  if (M > 10.0) reasons.push("Price above $10.00 universe ceiling");
-  if (ORW <= Math.max(0.015 * ORM, 10 * quote.tick)) reasons.push("Opening range too tight/noisy");
-  if (ORPct > 0.18) reasons.push("Opening range % too wide");
-  if (SpreadPct > SpreadMaxVal) reasons.push("Spread too wide");
-  if (R < RVOL_Min) reasons.push("RVOL below minimum threshold");
-  if (VWAP_Distance > VWAP_Max) reasons.push("Too extended from VWAP");
-  if (ORB_Breakout > ORB_Max) reasons.push("Too extended from ORB high");
-  if (Mom < Mom_Min) reasons.push("Momentum below minimum threshold");
-  if (OracleScore < RequiredScore) reasons.push("Composite score below required threshold");
+  const chaseKappa = clip(
+    0.2 + 0.2 * catalyst + 0.15 * sRvol + 0.1 * sMom,
+    0.2,
+    0.6
+  );
 
-  const invalid = reasons.length > 0;
+  const maxEntry =
+    direction === 1
+      ? entryTrigger + chaseKappa * orw
+      : entryTrigger - chaseKappa * orw;
 
-  // STEP 17: Final solved entry price
+  const invalidReasons: string[] = [];
+
+  if (mid < 0.2) invalidReasons.push("PRICE_BELOW_0_20");
+  if (mid > 10) invalidReasons.push("PRICE_ABOVE_10");
+  if (orw <= Math.max(ORACLE_CONST.OR_PCT_MIN * orm, 10 * tickSize)) {
+    invalidReasons.push("OPENING_RANGE_TOO_TIGHT");
+  }
+  if (orPct > ORACLE_CONST.OR_PCT_MAX) invalidReasons.push("OPENING_RANGE_TOO_WIDE");
+  if (spr > spreadMax(mid)) invalidReasons.push("SPREAD_TOO_WIDE");
+  if (blendedRvol < rvolMin) invalidReasons.push("RVOL_TOO_LOW");
+  if (vwapDistance > vwapMax) invalidReasons.push("VWAP_TOO_EXTENDED");
+  if (orbBreakout > orbMax) invalidReasons.push("ORB_TOO_EXTENDED");
+  if (x.mom < momMin) invalidReasons.push("MOMENTUM_TOO_LOW");
+  if (oracleScore < requiredScore) invalidReasons.push("SCORE_TOO_LOW");
+
+  const valid = invalidReasons.length === 0;
+
   let suggestedEntry: number | null = null;
-  if (!invalid) {
-    if (M < OracleEntryTrigger) {
-      suggestedEntry = OracleEntryTrigger;
-    } else if (quote.ask >= OracleEntryTrigger && quote.ask <= MaxEntryPrice) {
-      suggestedEntry = quote.ask;
-    } else {
-      suggestedEntry = null;
+
+  if (valid && direction === 1) {
+    if (mid < entryTrigger) {
+      suggestedEntry = entryTrigger;
+    } else if (x.ask >= entryTrigger && x.ask <= maxEntry) {
+      suggestedEntry = x.ask;
+    }
+  }
+
+  if (valid && direction === -1) {
+    if (mid > entryTrigger) {
+      suggestedEntry = entryTrigger;
+    } else if (x.bid <= entryTrigger && x.bid >= maxEntry) {
+      suggestedEntry = x.bid;
     }
   }
 
   return {
-    symbol: quote.symbol,
-    score: OracleScore,
-    requiredScore: RequiredScore,
-    passed: !invalid && OracleScore >= RequiredScore,
-    invalid,
-    invalidReasons: reasons,
-    entryTrigger: invalid ? null : OracleEntryTrigger,
-    maxEntryPrice: invalid ? null : MaxEntryPrice,
-    suggestedEntry,
-    components: {
-      sVwap: S_VWAP,
-      sOrb: S_ORB,
-      sRvol: S_RVOL,
-      sMom: S_MOM,
-      momentum: Mom,
-      acceleration: A,
-      vwapDistance: VWAP_Distance,
-      orbBreakout: ORB_Breakout,
-      blendedRvol: R,
-      spreadPct: SpreadPct,
-    },
-    catalystScore: C,
-    timestamp: quote.timestamp,
-  };
-}
+    valid,
+    invalidReasons,
 
-function buildInvalidResult(
-  quote: Quote,
-  C: number,
-  spreadPctVal: number,
-  R: number,
-  reasons: string[]
-): OracleResult {
-  return {
-    symbol: quote.symbol,
-    score: 0,
-    requiredScore: 0.72 - 0.12 * C,
-    passed: false,
-    invalid: true,
-    invalidReasons: reasons,
-    entryTrigger: null,
-    maxEntryPrice: null,
-    suggestedEntry: null,
-    components: {
-      sVwap: 0,
-      sOrb: 0,
-      sRvol: 0,
-      sMom: 0,
-      momentum: 0,
-      acceleration: 0,
-      vwapDistance: 0,
-      orbBreakout: 0,
-      blendedRvol: R,
-      spreadPct: spreadPctVal,
-    },
-    catalystScore: C,
-    timestamp: quote.timestamp,
+    midpoint: roundPrice(mid, tickSize),
+    spreadPct: spr,
+
+    vwapDistance,
+    orbBreakout,
+
+    sVwap,
+    sOrb,
+    sRvol,
+    sMom,
+
+    oracleScore,
+    requiredScore,
+
+    entryTrigger: roundPrice(entryTrigger, tickSize),
+    maxEntry: roundPrice(maxEntry, tickSize),
+    suggestedEntry: suggestedEntry === null ? null : roundPrice(suggestedEntry, tickSize)
   };
-}
+};
