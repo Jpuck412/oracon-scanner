@@ -1,53 +1,104 @@
-/**
- * Catalyst scoring module — returns C (0 to 1) consumed by both
- * Oracle and Rubicon engines to relax/tighten thresholds.
- *
- * CURRENT STATE: Stub implementation. Returns 0 (no catalyst) for
- * everything until a real news/sentiment source is wired in (likely
- * candidate: Gemini API for headline parsing, once that decision is
- * made). This lets both engines run and be tested TODAY without
- * blocking on an undecided data source.
- *
- * When real data is wired in, only the body of getCatalystScore()
- * needs to change — the function signature and return contract
- * stay identical, so nothing downstream breaks.
- */
+import { clip01 } from "@/lib/marketMath";
+import type { FmpNewsItem } from "@/types/scanner";
 
-export interface CatalystResult {
-  score: number;       // 0 to 1
-  hasNews: boolean;     // quick boolean check for UI badges
-  headline?: string;    // optional, for display in the scanner UI
-  source?: string;      // where the catalyst was detected (e.g. "PR Newswire")
-}
+const MAJOR_KEYWORDS = [
+  "fda approval",
+  "approved by fda",
+  "phase 3",
+  "phase iii",
+  "clinical trial met",
+  "positive topline",
+  "merger",
+  "acquisition",
+  "buyout",
+  "definitive agreement",
+  "earnings beat",
+  "raises guidance",
+  "guidance raised",
+  "contract awarded",
+  "major contract",
+  "partnership",
+  "strategic collaboration"
+];
 
-/**
- * Get the catalyst score for a symbol.
- * STUB: always returns 0/no-catalyst until real news source is integrated.
- */
-export async function getCatalystScore(symbol: string): Promise<CatalystResult> {
-  // TODO: wire in real news/sentiment source (Gemini API or news wire API)
-  // For now, every symbol is treated as having no catalyst, meaning both
-  // engines run their FULL/STRICT thresholds with zero relief.
-  return {
-    score: 0,
-    hasNews: false,
-  };
-}
+const STRONG_KEYWORDS = [
+  "fda",
+  "earnings",
+  "revenue growth",
+  "guidance",
+  "contract",
+  "patent",
+  "launches",
+  "approval",
+  "grant",
+  "nasdaq compliance",
+  "debt financing",
+  "asset sale"
+];
 
-/**
- * Batch version — fetch catalyst scores for multiple symbols at once.
- * Useful for the scanner's main loop, which evaluates many tickers per tick.
- * Stub just maps the single-symbol stub, but a real implementation could
- * batch the API call for efficiency.
- */
-export async function getCatalystScores(
-  symbols: string[]
-): Promise<Map<string, CatalystResult>> {
-  const results = new Map<string, CatalystResult>();
+const WEAK_KEYWORDS = [
+  "announces",
+  "update",
+  "presentation",
+  "conference",
+  "interview",
+  "letter to shareholders"
+];
 
-  for (const symbol of symbols) {
-    results.set(symbol.toUpperCase(), await getCatalystScore(symbol));
+const ageHours = (dateString?: string): number => {
+  if (!dateString) return 999;
+  const t = new Date(dateString).getTime();
+  if (!Number.isFinite(t)) return 999;
+  return Math.max(0, (Date.now() - t) / 36e5);
+};
+
+const keywordWeight = (text: string): number => {
+  const s = text.toLowerCase();
+
+  if (MAJOR_KEYWORDS.some((k) => s.includes(k))) return 1.0;
+  if (STRONG_KEYWORDS.some((k) => s.includes(k))) return 0.75;
+  if (WEAK_KEYWORDS.some((k) => s.includes(k))) return 0.35;
+
+  return 0;
+};
+
+export const scoreCatalystFromNews = (
+  symbol: string,
+  news: FmpNewsItem[]
+): { score: number; headline: string | null } => {
+  let bestScore = 0;
+  let bestHeadline: string | null = null;
+
+  for (const item of news) {
+    const joined = `${item.title ?? ""} ${item.text ?? ""}`;
+    const kw = keywordWeight(joined);
+    if (kw <= 0) continue;
+
+    const hours = ageHours(item.publishedDate);
+
+    const recency =
+      hours <= 4 ? 1.0 :
+      hours <= 12 ? 0.85 :
+      hours <= 24 ? 0.7 :
+      hours <= 48 ? 0.45 :
+      0.2;
+
+    const symbolMatch =
+      !item.symbol ||
+      item.symbol.toUpperCase() === symbol.toUpperCase()
+        ? 1.0
+        : 0.7;
+
+    const score = clip01(kw * recency * symbolMatch);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestHeadline = item.title ?? null;
+    }
   }
 
-  return results;
-}
+  return {
+    score: clip01(bestScore),
+    headline: bestHeadline
+  };
+};
