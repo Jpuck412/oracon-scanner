@@ -47,8 +47,11 @@ const WEAK_KEYWORDS = [
 
 const ageHours = (dateString?: string): number => {
   if (!dateString) return 999;
+
   const t = new Date(dateString).getTime();
+
   if (!Number.isFinite(t)) return 999;
+
   return Math.max(0, (Date.now() - t) / 36e5);
 };
 
@@ -70,9 +73,10 @@ export const scoreCatalystFromNews = (
   let bestHeadline: string | null = null;
 
   for (const item of news) {
-    const joined = `${item.title ?? ""} ${item.text ?? ""}`;
-    const kw = keywordWeight(joined);
-    if (kw <= 0) continue;
+    const text = `${item.title ?? ""} ${item.text ?? ""}`;
+    const keywordScore = keywordWeight(text);
+
+    if (keywordScore <= 0) continue;
 
     const hours = ageHours(item.publishedDate);
 
@@ -89,7 +93,7 @@ export const scoreCatalystFromNews = (
         ? 1.0
         : 0.7;
 
-    const score = clip01(kw * recency * symbolMatch);
+    const score = clip01(keywordScore * recency * symbolMatch);
 
     if (score > bestScore) {
       bestScore = score;
