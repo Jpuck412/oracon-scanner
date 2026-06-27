@@ -1,60 +1,39 @@
-export async function GET() {
-  const apiKey = process.env.FMPKEY;
+import { NextResponse } from "next/server";
+import { buildScannerRows } from "@/lib/dataAdapter";
 
-  if (!apiKey) {
-    return Response.json({
-      ok: false,
-      source: "fmp",
-      count: 0,
-      data: { tickers: [] },
-      tickers: [],
-      error: "FMPKEY not set",
-    });
-  }
+export const dynamic = "force-dynamic";
+export const revalidate = 0;
 
+export async function GET(req: Request) {
   try {
-    const res = await fetch(
-      `https://financialmodelingprep.com/api/v3/stock_market/gainers?apikey=${apiKey}`,
-      { cache: "no-store" }
+    const url = new URL(req.url);
+
+    const limit = Math.min(
+      100,
+      Math.max(1, Number(url.searchParams.get("limit") ?? 40))
     );
 
-    if (!res.ok) {
-      return Response.json({
-        ok: false,
-        source: "fmp",
-        count: 0,
-        data: { tickers: [] },
-        tickers: [],
-        error: `FMP HTTP ${res.status}`,
-      });
-    }
+    const rows = await buildScannerRows(limit);
 
-    const raw = await res.json();
-
-    const tickers = Array.isArray(raw)
-      ? raw.map((r: any) => ({
-          ticker: r.symbol,
-          price: r.price,
-          prevClose: r.price - r.change,
-          volume: r.volume ?? 0,
-        }))
-      : [];
-
-    return Response.json({
+    return NextResponse.json({
       ok: true,
-      source: "fmp",
-      count: tickers.length,
-      data: { tickers },
-      tickers,
+      generatedAt: new Date().toISOString(),
+      universe: "$0.20-$10.00",
+      count: rows.length,
+      rows
     });
-  } catch (err: any) {
-    return Response.json({
-      ok: false,
-      source: "fmp",
-      count: 0,
-      data: { tickers: [] },
-      tickers: [],
-      error: String(err?.message ?? err),
-    });
+  } catch (err) {
+    const message =
+      err instanceof Error ? err.message : "Unknown scanner error";
+
+    return NextResponse.json(
+      {
+        ok: false,
+        error: message
+      },
+      {
+        status: 500
+      }
+    );
   }
 }
