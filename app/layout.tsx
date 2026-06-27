@@ -1,19 +1,19 @@
-import type { Metadata } from "next";
 import "./globals.css";
+import type { Metadata } from "next";
 
 export const metadata: Metadata = {
-  title: "Oracon Scanner",
-  description: "Dual-engine real-time stock scanner — Rubicon breakout detection + Oracle VWAP/ORB momentum tracking",
+  title: "Oracle Rubicon Scanner",
+  description: "$0.20-$10 real-time momentum scanner using Oracle and Rubicon formulas"
 };
 
 export default function RootLayout({
-  children,
+  children
 }: {
   children: React.ReactNode;
 }) {
   return (
     <html lang="en">
-      <body className="bg-background text-foreground antialiased">{children}</body>
+      <body>{children}</body>
     </html>
   );
 }
