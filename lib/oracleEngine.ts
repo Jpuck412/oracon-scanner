@@ -1,4 +1,11 @@
-import { clip, clip01, midpoint, roundPrice, spreadMax, spreadPct } from "@/lib/marketMath";
+import {
+  clip,
+  clip01,
+  midpoint,
+  roundPrice,
+  spreadMax,
+  spreadPct
+} from "@/lib/marketMath";
 import type { Direction, OracleResult } from "@/types/scanner";
 
 export type OracleInput = {
@@ -88,8 +95,14 @@ export const computeOracle = (x: OracleInput): OracleResult => {
   const vwapDistance = x.vwap > 0 ? direction * ((mid - x.vwap) / x.vwap) : -1;
 
   const sVwap =
-    clip01((vwapDistance - ORACLE_CONST.VWAP_MIN) / (ORACLE_CONST.VWAP_IDEAL - ORACLE_CONST.VWAP_MIN)) *
-    clip01((vwapMax - vwapDistance) / (vwapMax - ORACLE_CONST.VWAP_IDEAL));
+    clip01(
+      (vwapDistance - ORACLE_CONST.VWAP_MIN) /
+        (ORACLE_CONST.VWAP_IDEAL - ORACLE_CONST.VWAP_MIN)
+    ) *
+    clip01(
+      (vwapMax - vwapDistance) /
+        (vwapMax - ORACLE_CONST.VWAP_IDEAL)
+    );
 
   const orbLevel =
     ((1 + direction) / 2) * orh +
@@ -98,8 +111,14 @@ export const computeOracle = (x: OracleInput): OracleResult => {
   const orbBreakout = orw > 0 ? direction * ((mid - orbLevel) / orw) : -1;
 
   const sOrb =
-    clip01((orbBreakout - ORACLE_CONST.ORB_MIN) / (ORACLE_CONST.ORB_IDEAL - ORACLE_CONST.ORB_MIN)) *
-    clip01((orbMax - orbBreakout) / (orbMax - ORACLE_CONST.ORB_IDEAL));
+    clip01(
+      (orbBreakout - ORACLE_CONST.ORB_MIN) /
+        (ORACLE_CONST.ORB_IDEAL - ORACLE_CONST.ORB_MIN)
+    ) *
+    clip01(
+      (orbMax - orbBreakout) /
+        (orbMax - ORACLE_CONST.ORB_IDEAL)
+    );
 
   const sRvol = clip01((blendedRvol - rvolMin) / (rvolTarget - rvolMin));
   const sMom = clip01((x.mom - momMin) / (momTarget - momMin));
@@ -154,9 +173,11 @@ export const computeOracle = (x: OracleInput): OracleResult => {
 
   if (mid < 0.2) invalidReasons.push("PRICE_BELOW_0_20");
   if (mid > 10) invalidReasons.push("PRICE_ABOVE_10");
+
   if (orw <= Math.max(ORACLE_CONST.OR_PCT_MIN * orm, 10 * tickSize)) {
     invalidReasons.push("OPENING_RANGE_TOO_TIGHT");
   }
+
   if (orPct > ORACLE_CONST.OR_PCT_MAX) invalidReasons.push("OPENING_RANGE_TOO_WIDE");
   if (spr > spreadMax(mid)) invalidReasons.push("SPREAD_TOO_WIDE");
   if (blendedRvol < rvolMin) invalidReasons.push("RVOL_TOO_LOW");
