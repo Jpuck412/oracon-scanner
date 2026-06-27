@@ -1,110 +1,96 @@
-/**
- * Tradier production API client — real-time quotes for the scanner.
- * Uses the PRODUCTION endpoint (api.tradier.com), not sandbox, since
- * Oracle/Rubicon require real-time tick data, not 15-min delayed.
- *
- * Requires TRADIER_API_KEY set as an environment variable in Vercel
- * (Project Settings -> Environment Variables). NEVER hardcode the
- * token here or commit it to the repo.
- */
+import type { TradierQuote, TradierTimeSaleBar } from "@/types/scanner";
 
-const TRADIER_BASE_URL = "https://api.tradier.com/v1";
+const TRADIER_BASE_URL =
+  process.env.TRADIER_BASE_URL || "https://api.tradier.com/v1";
 
-interface TradierQuoteRaw {
-  symbol: string;
-  bid: number;
-  ask: number;
-  last: number;
-  volume: number;
-  average_volume: number;
-  vwap?: number; // not always returned, may need separate calc
-}
+const TRADIER_ACCESS_TOKEN = process.env.TRADIER_ACCESS_TOKEN;
 
-interface TradierQuotesResponse {
-  quotes: {
-    quote: TradierQuoteRaw | TradierQuoteRaw[];
-  };
-}
-
-function getApiKey(): string {
-  const key = process.env.TRADIER_API_KEY;
-  if (!key) {
-    throw new Error(
-      "TRADIER_API_KEY is not set. Add it in Vercel Project Settings -> Environment Variables."
-    );
+const requireTradierToken = (): string => {
+  if (!TRADIER_ACCESS_TOKEN) {
+    throw new Error("Missing TRADIER_ACCESS_TOKEN in environment.");
   }
-  return key;
-}
 
-/**
- * Fetch real-time quotes for one or more symbols from Tradier's
- * production market data endpoint.
- */
-export async function fetchQuotes(symbols: string[]): Promise<TradierQuoteRaw[]> {
+  return TRADIER_ACCESS_TOKEN;
+};
+
+const tradierFetch = async <T>(
+  path: string,
+  params: Record<string, string | number | boolean | undefined> = {}
+): Promise<T> => {
+  const token = requireTradierToken();
+
+  const url = new URL(`${TRADIER_BASE_URL}${path}`);
+
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null) {
+      url.searchParams.set(key, String(value));
+    }
+  }
+
+  const res = await fetch(url.toString(), {
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: "application/json"
+    },
+    cache: "no-store"
+  });
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`Tradier ${res.status}: ${text}`);
+  }
+
+  return res.json() as Promise<T>;
+};
+
+export const getTradierQuotes = async (
+  symbols: string[]
+): Promise<TradierQuote[]> => {
   if (symbols.length === 0) return [];
 
-  const apiKey = getApiKey();
-  const url = `${TRADIER_BASE_URL}/markets/quotes?symbols=${encodeURIComponent(
-    symbols.join(",")
-  )}&greeks=false`;
+  const out: TradierQuote[] = [];
+  const chunkSize = 100;
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-    },
-    // Real-time data should never be cached
-    cache: "no-store",
-  });
+  for (let i = 0; i < symbols.length; i += chunkSize) {
+    const chunk = symbols.slice(i, i + chunkSize);
 
-  if (!response.ok) {
-    throw new Error(`Tradier API error: ${response.status} ${response.statusText}`);
+    const data = await tradierFetch<{
+      quotes?: { quote?: TradierQuote | TradierQuote[] };
+    }>("/markets/quotes", {
+      symbols: chunk.join(","),
+      greeks: false
+    });
+
+    const quote = data.quotes?.quote;
+
+    if (Array.isArray(quote)) out.push(...quote);
+    else if (quote) out.push(quote);
   }
 
-  const data: TradierQuotesResponse = await response.json();
-  const quote = data.quotes?.quote;
+  return out;
+};
 
-  if (!quote) return [];
-
-  // Tradier returns a single object (not array) when only 1 symbol is requested
-  return Array.isArray(quote) ? quote : [quote];
-}
-
-/**
- * Fetch historical/intraday time & sales data — used to derive
- * opening range (first 5-min candle) and average volume by time-of-day.
- */
-export async function fetchTimeSales(
+export const getTradierTimesales = async (
   symbol: string,
-  interval: "1min" | "5min" = "1min",
-  start?: string,
-  end?: string
-): Promise<any> {
-  const apiKey = getApiKey();
-  const params = new URLSearchParams({
+  start: string,
+  end: string,
+  interval: "1min" | "5min" | "15min" | "tick" = "1min",
+  sessionFilter: "open" | "all" = "open"
+): Promise<TradierTimeSaleBar[]> => {
+  const data = await tradierFetch<{
+    series?: { data?: TradierTimeSaleBar | TradierTimeSaleBar[] };
+  }>("/markets/timesales", {
     symbol,
     interval,
-    ...(start && { start }),
-    ...(end && { end }),
+    start,
+    end,
+    session_filter: sessionFilter
   });
 
-  const url = `${TRADIER_BASE_URL}/markets/timesales?${params.toString()}`;
+  const raw = data.series?.data;
 
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-      Accept: "application/json",
-    },
-    cache: "no-store",
-  });
+  if (!raw) return [];
+  if (Array.isArray(raw)) return raw;
 
-  if (!response.ok) {
-    throw new Error(`Tradier timesales error: ${response.status} ${response.statusText}`);
-  }
-
-  return response.json();
-}
-
-export type { TradierQuoteRaw };
+  return [raw];
+};
