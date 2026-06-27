@@ -84,11 +84,11 @@ export type IntradayContext = {
   openingRangeLow: number;
   rvolCumulative: number;
   rvolOneMinute: number;
+  cumulativeVolume: number;
+  oneMinuteVolume: number;
   m1: number;
   m3: number;
   m5: number;
-  cumulativeVolume: number;
-  oneMinuteVolume: number;
 };
 
 export type OracleResult = {
