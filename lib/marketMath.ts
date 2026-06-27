@@ -1,103 +1,45 @@
-/**
- * Shared market math primitives used by both Oracle and Rubicon engines.
- * All clamp/momentum/spread calculations live here so both engines
- * consume identical, single-source-of-truth math.
- */
+import type { MomentumResult, TradierTimeSaleBar } from "@/types/scanner";
 
-const EPSILON = 1e-8;
+export const clip = (x: number, a: number, b: number): number =>
+  Math.min(Math.max(x, a), b);
 
-/** Clamp x to [0, 1] */
-export function clip01(x: number): number {
-  if (Number.isNaN(x)) return 0;
-  return Math.max(0, Math.min(1, x));
-}
+export const clip01 = (x: number): number => clip(x, 0, 1);
 
-/** Clamp x to [lo, hi] */
-export function clip(x: number, lo: number, hi: number): number {
-  if (Number.isNaN(x)) return lo;
-  return Math.max(lo, Math.min(hi, x));
-}
+export const safeNumber = (x: unknown, fallback = 0): number => {
+  const n = Number(x);
+  return Number.isFinite(n) ? n : fallback;
+};
 
-/** Safe division guard — prevents NaN/Infinity propagating into UI */
-export function safeDiv(numerator: number, denominator: number, fallback = 0): number {
-  if (Math.abs(denominator) < EPSILON) return fallback;
-  return numerator / denominator;
-}
+export const midpoint = (bid: number, ask: number, last?: number): number => {
+  if (bid > 0 && ask > 0) return (bid + ask) / 2;
+  if (last && last > 0) return last;
+  return 0;
+};
 
-export interface QuoteInput {
-  bid: number;
-  ask: number;
-}
+export const spreadPct = (bid: number, ask: number, price: number): number => {
+  if (price <= 0 || ask <= 0 || bid <= 0) return 1;
+  return (ask - bid) / price;
+};
 
-/** Midpoint price M = (Bid + Ask) / 2 */
-export function midpoint({ bid, ask }: QuoteInput): number {
-  return (bid + ask) / 2;
-}
+export const spreadMax = (price: number): number =>
+  0.012 + 0.018 * clip01((1.0 - price) / 0.8);
 
-/** Spread as % of midpoint: (Ask - Bid) / M */
-export function spreadPct({ bid, ask }: QuoteInput): number {
-  const m = midpoint({ bid, ask });
-  return safeDiv(ask - bid, m, 0);
-}
+export const velocity = (
+  currentPrice: number,
+  pastPrice: number,
+  minutes: number,
+  direction: 1 | -1 = 1
+): number => {
+  if (currentPrice <= 0 || pastPrice <= 0 || minutes <= 0) return 0;
+  return direction * 100 * (Math.log(currentPrice) - Math.log(pastPrice)) / minutes;
+};
 
-/**
- * Price-scaled max spread allowance.
- * Lower-priced stocks naturally have wider relative spreads,
- * so the cap loosens as price falls below $1.00.
- */
-export function spreadMax(midpointPrice: number): number {
-  const factor = clip01((1.0 - midpointPrice) / 0.8);
-  return 0.012 + 0.018 * factor;
-}
+export const computeMomentum = params => {
+  const { currentPrice, m1, m3, m5, spreadPctNow, direction = 1 } = params;
 
-export interface OpeningRange {
-  orh: number; // 5-min opening range high
-  orl: number; // 5-min opening range low
-}
-
-export interface OpeningRangeStats {
-  width: number;   // ORW
-  mid: number;      // ORM
-  pct: number;      // ORPct
-}
-
-/** Opening range width, midpoint, and width as % of its own midpoint */
-export function openingRangeStats({ orh, orl }: OpeningRange): OpeningRangeStats {
-  const width = orh - orl;
-  const mid = (orh + orl) / 2;
-  const pct = safeDiv(width, mid, 0);
-  return { width, mid, pct };
-}
-
-/** Blended RVOL: 60% cumulative, 40% 1-minute */
-export function blendedRVOL(rvolCum: number, rvol1m: number): number {
-  return 0.6 * rvolCum + 0.4 * rvol1m;
-}
-
-export interface MomentumInputs {
-  m: number;  // current midpoint
-  m1: number; // midpoint 1 minute ago
-  m3: number; // midpoint 3 minutes ago
-  m5: number; // midpoint 5 minutes ago
-  spreadPctValue: number;
-}
-
-export interface MomentumResult {
-  v1: number;
-  v3: number;
-  v5: number;
-  acceleration: number; // A = v1 - v5
-  mom: number;          // final blended momentum score
-}
-
-/**
- * Log-return momentum across 1/3/5-minute windows, blended with
- * acceleration bias and a spread penalty.
- */
-export function momentum({ m, m1, m3, m5, spreadPctValue }: MomentumInputs): MomentumResult {
-  const v1 = 100 * Math.log(safeDiv(m, m1, 1));
-  const v3 = (100 * Math.log(safeDiv(m, m3, 1))) / 3;
-  const v5 = (100 * Math.log(safeDiv(m, m5, 1))) / 5;
+  const v1 = velocity(currentPrice, m1, 1, direction);
+  const v3 = velocity(currentPrice, m3, 3, direction);
+  const v5 = velocity(currentPrice, m5, 5, direction);
 
   const acceleration = v1 - v5;
 
@@ -107,7 +49,70 @@ export function momentum({ m, m1, m3, m5, spreadPctValue }: MomentumInputs): Mom
     0.2 * v5 +
     0.35 * Math.max(acceleration, 0) -
     0.6 * Math.max(-acceleration, 0) -
-    25 * spreadPctValue;
+    25 * spreadPctNow;
 
   return { v1, v3, v5, acceleration, mom };
-}
+};
+
+export type MomentumInput = {
+  currentPrice: number;
+  m1: number;
+  m3: number;
+  m5: number;
+  spreadPctNow: number;
+  direction?: 1 | -1;
+};
+
+export const computeDailyVwap = (bars: TradierTimeSaleBar[]): number => {
+  let pv = 0;
+  let vol = 0;
+
+  for (const b of bars) {
+    const v = safeNumber(b.volume);
+    if (v <= 0) continue;
+
+    const px =
+      safeNumber(b.vwap) ||
+      safeNumber(b.close) ||
+      safeNumber(b.price) ||
+      (safeNumber(b.high) + safeNumber(b.low) + safeNumber(b.close)) / 3;
+
+    pv += px * v;
+    vol += v;
+  }
+
+  return vol > 0 ? pv / vol : 0;
+};
+
+export const computeOpeningRange = (
+  bars: TradierTimeSaleBar[],
+  minutes = 5
+): { high: number; low: number } => {
+  const firstBars = bars.slice(0, minutes);
+
+  const high = Math.max(...firstBars.map((b) => safeNumber(b.high)));
+  const low = Math.min(...firstBars.map((b) => safeNumber(b.low)));
+
+  return {
+    high: Number.isFinite(high) ? high : 0,
+    low: Number.isFinite(low) ? low : 0
+  };
+};
+
+export const getCloseNMinutesAgo = (
+  bars: TradierTimeSaleBar[],
+  minutesAgo: number,
+  fallback: number
+): number => {
+  if (bars.length === 0) return fallback;
+
+  const idx = Math.max(0, bars.length - 1 - minutesAgo);
+  const bar = bars[idx];
+
+  return safeNumber(bar?.close, fallback);
+};
+
+export const roundPrice = (price: number, tickSize = 0.0001): number => {
+  if (!Number.isFinite(price)) return 0;
+  return Math.round(price / tickSize) * tickSize;
+};
