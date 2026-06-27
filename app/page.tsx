@@ -1,94 +1,148 @@
 "use client";
-import React, { useEffect, useMemo, useState } from "react";
 
-interface Stock {
-  ticker: string; price: number; gain: number; volume: number;
-  eliteScore: number; lifecycle: string; verdict: string;
-}
+import { useEffect, useMemo, useState } from "react";
+import type { ScannerRow } from "@/types/scanner";
 
-function normalize(raw: any): Stock {
-  const ticker = String(raw.ticker ?? raw.T ?? raw.symbol ?? "???").toUpperCase();
-  const price = Number(raw.lastPrice ?? raw.price ?? raw.c ?? 0);
-  const prevClose = Number(raw.prevClose ?? raw.pc ?? (price * 0.95));
-  const gain = prevClose > 0 ? ((price - prevClose) / prevClose) * 100 : 0;
-  const volume = Number(raw.volume ?? raw.v ?? 0);
-  const eliteScore = Math.round(Math.min(100, Math.abs(gain) * 3 + (volume > 500000 ? 20 : 0)));
-  const lifecycle = gain >= 75 ? "EXTENDED" : gain >= 30 ? "RUNNING" : gain >= 12 ? "IGNITING" : gain >= 3 ? "FORMING" : "WAKING";
-  const verdict = eliteScore >= 72 ? "YES" : eliteScore >= 50 ? "WAIT" : "NO";
-  return { ticker, price, gain, volume, eliteScore, lifecycle, verdict };
-}
+const fmt = (n: number | null | undefined, digits = 2) =>
+  typeof n === "number" && Number.isFinite(n) ? n.toFixed(digits) : "-";
+
+const pct = (n: number | null | undefined, digits = 2) =>
+  typeof n === "number" && Number.isFinite(n)
+    ? `${(n * 100).toFixed(digits)}%`
+    : "-";
+
+const money = (n: number | null | undefined) =>
+  typeof n === "number" && Number.isFinite(n)
+    ? `$${n.toFixed(n < 1 ? 4 : 2)}`
+    : "-";
 
 export default function Page() {
-  const [stocks, setStocks] = useState<Stock[]>([]);
-  const [apiOk, setApiOk] = useState(false);
-  const [lastScan, setLastScan] = useState("");
+  const [rows, setRows] = useState<ScannerRow[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [updated, setUpdated] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
 
-  async function load() {
+  const load = async () => {
     try {
-      const res = await fetch("/api/gainers", { cache: "no-store" });
+      const res = await fetch("/api/gainers?limit=40", {
+        cache: "no-store"
+      });
+
       const json = await res.json();
-      const list = Array.isArray(json?.data?.tickers) ? json.data.tickers
-        : Array.isArray(json?.tickers) ? json.tickers
-        : Array.isArray(json?.results) ? json.results
-        : [];
-      setStocks(list.map(normalize).sort((a: Stock, b: Stock) => b.eliteScore - a.eliteScore));
-      setApiOk(true);
-    } catch {
-      setApiOk(false);
+
+      if (!json.ok) {
+        throw new Error(json.error ?? "Scanner failed");
+      }
+
+      setRows(json.rows);
+      setUpdated(json.generatedAt);
+      setError(null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Unknown error");
+    } finally {
+      setLoading(false);
     }
-    setLastScan(new Date().toISOString());
-  }
+  };
 
   useEffect(() => {
     load();
-    const id = setInterval(load, 30000);
+
+    const id = setInterval(load, 5000);
+
     return () => clearInterval(id);
   }, []);
 
+  const greenCount = useMemo(
+    () => rows.filter((r) => r.rubicon.state === "GREEN").length,
+    [rows]
+  );
+
   return (
-    <div style={{ background: "#20242B", color: "#E6EAF0", minHeight: "100vh", fontFamily: "Inter, system-ui, sans-serif", padding: 16 }}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
+    <main className="shell">
+      <section className="hero">
         <div>
-          <div style={{ color: "#4DA3FF", fontWeight: 700, fontSize: 16 }}>PROOF OF STRUCTURE™ ELITE</div>
-          <div style={{ color: "#9AA4B2", fontSize: 12 }}>Evidence Before Entry.</div>
+          <p className="eyebrow">Oracle + Rubicon Scanner</p>
+          <h1>$0.20-$10 Momentum Engine</h1>
+          <p className="sub">
+            Uses FMPKEY for FMP gainers, float, and news. Uses TRADIER_API_KEY
+            for Tradier quotes and time-sales.
+          </p>
         </div>
-        <div style={{ fontSize: 11, color: "#9AA4B2" }}>
-          <span style={{ color: apiOk ? "#00D084" : "#FF5C5C" }}>● {apiOk ? "API LIVE" : "API DOWN"}</span>
-          {" "}— last scan {lastScan ? new Date(lastScan).toLocaleTimeString() : "—"}
+
+        <div className="statusBox">
+          <span>{loading ? "Loading" : "Live"}</span>
+          <strong>{greenCount}</strong>
+          <small>GREEN setups</small>
         </div>
+      </section>
+
+      {error && <div className="error">{error}</div>}
+
+      <div className="meta">
+        Last update: {updated ? new Date(updated).toLocaleTimeString() : "-"}
       </div>
 
-      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
-        <thead>
-          <tr style={{ textAlign: "left", color: "#4DA3FF", borderBottom: "1px solid #3A404C" }}>
-            <th style={{ padding: 8 }}>Ticker</th>
-            <th style={{ padding: 8 }}>Price</th>
-            <th style={{ padding: 8 }}>Gain</th>
-            <th style={{ padding: 8 }}>Volume</th>
-            <th style={{ padding: 8 }}>Lifecycle</th>
-            <th style={{ padding: 8 }}>Elite</th>
-            <th style={{ padding: 8 }}>Verdict</th>
-          </tr>
-        </thead>
-        <tbody>
-          {stocks.length === 0 && (
-            <tr><td colSpan={7} style={{ padding: 16, color: "#9AA4B2", textAlign: "center" }}>
-              No tickers returned from API.
-            </td></tr>
-          )}
-          {stocks.map((s) => (
-            <tr key={s.ticker} style={{ borderBottom: "1px solid #3A404C" }}>
-              <td style={{ padding: 8, fontFamily: "monospace" }}>{s.ticker}</td>
-              <td style={{ padding: 8 }}>${s.price.toFixed(2)}</td>
-              <td style={{ padding: 8, color: s.gain >= 0 ? "#00D084" : "#FF5C5C" }}>{s.gain.toFixed(2)}%</td>
-              <td style={{ padding: 8 }}>{s.volume.toLocaleString()}</td>
-              <td style={{ padding: 8 }}>{s.lifecycle}</td>
-              <td style={{ padding: 8 }}>{s.eliteScore}</td>
-              <td style={{ padding: 8, color: s.verdict === "YES" ? "#00D084" : s.verdict === "WAIT" ? "#FFB547" : "#FF5C5C" }}>{s.verdict}</td>
+      <section className="tableWrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Price</th>
+              <th>State</th>
+              <th>Entry</th>
+              <th>Max Entry</th>
+              <th>Oracle</th>
+              <th>RVOL</th>
+              <th>Mom</th>
+              <th>Spread</th>
+              <th>Float</th>
+              <th>Catalyst</th>
             </tr>
-          ))}
-        </tbody>
-      </table>
-    </div>
+          </thead>
+
+          <tbody>
+            {rows.map((r) => (
+              <tr key={r.symbol}>
+                <td>
+                  <strong>{r.symbol}</strong>
+                  <span>{r.name ?? ""}</span>
+                </td>
+
+                <td>{money(r.price)}</td>
+
+                <td>
+                  <b className={`pill ${r.rubicon.state.toLowerCase()}`}>
+                    {r.rubicon.state}
+                  </b>
+                </td>
+
+                <td>{money(r.oracle.suggestedEntry ?? r.oracle.entryTrigger)}</td>
+                <td>{money(r.oracle.maxEntry)}</td>
+
+                <td>
+                  {fmt(r.oracle.oracleScore, 3)}
+                  <span>req {fmt(r.oracle.requiredScore, 3)}</span>
+                </td>
+
+                <td>{fmt(r.rvol, 2)}</td>
+                <td>{fmt(r.momentum.mom, 2)}</td>
+                <td>{pct(r.spreadPct, 2)}</td>
+
+                <td>
+                  {r.floatShares
+                    ? `${(r.floatShares / 1_000_000).toFixed(1)}M`
+                    : "-"}
+                </td>
+
+                <td title={r.catalystHeadline ?? ""}>
+                  {fmt(r.catalystScore, 2)}
+                  <span>{r.catalystHeadline ?? ""}</span>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </main>
   );
 }
