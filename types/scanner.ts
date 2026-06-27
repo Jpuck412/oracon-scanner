@@ -1,74 +1,159 @@
-/**
- * Shared TypeScript types for both Oracle and Rubicon engines,
- * plus the data shapes the UI layer consumes.
- */
+export type Direction = 1 | -1;
 
-export interface Quote {
+export type RubiconState = "YELLOW" | "GREEN" | "ORANGE";
+
+export type TradierQuote = {
   symbol: string;
+  description?: string;
+  exch?: string;
+  type?: string;
+
+  last?: number;
+  change?: number;
+  volume?: number;
+
+  open?: number;
+  high?: number;
+  low?: number;
+  close?: number;
+  prevclose?: number;
+
+  bid?: number;
+  ask?: number;
+  bidsize?: number;
+  asksize?: number;
+
+  average_volume?: number;
+  change_percentage?: number;
+  last_volume?: number;
+  trade_date?: number;
+};
+
+export type TradierTimeSaleBar = {
+  time: string;
+  timestamp?: number;
+
+  price?: number;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  vwap?: number;
+};
+
+export type FmpGainer = {
+  symbol: string;
+  name?: string;
+  price?: number;
+  change?: number;
+  changesPercentage?: number;
+  changePercentage?: number;
+};
+
+export type FmpFloatResponse = {
+  symbol?: string;
+  freeFloat?: number;
+  floatShares?: number;
+  outstandingShares?: number;
+  source?: string;
+};
+
+export type FmpNewsItem = {
+  symbol?: string;
+  publishedDate?: string;
+  publisher?: string;
+  title?: string;
+  image?: string;
+  site?: string;
+  text?: string;
+  url?: string;
+};
+
+export type MomentumResult = {
+  v1: number;
+  v3: number;
+  v5: number;
+  acceleration: number;
+  mom: number;
+};
+
+export type IntradayContext = {
+  vwap: number;
+  openingRangeHigh: number;
+  openingRangeLow: number;
+  rvolCumulative: number;
+  rvolOneMinute: number;
+  m1: number;
+  m3: number;
+  m5: number;
+  cumulativeVolume: number;
+  oneMinuteVolume: number;
+};
+
+export type OracleResult = {
+  valid: boolean;
+  invalidReasons: string[];
+
+  midpoint: number;
+  spreadPct: number;
+
+  vwapDistance: number;
+  orbBreakout: number;
+
+  sVwap: number;
+  sOrb: number;
+  sRvol: number;
+  sMom: number;
+
+  oracleScore: number;
+  requiredScore: number;
+
+  entryTrigger: number;
+  maxEntry: number;
+  suggestedEntry: number | null;
+};
+
+export type RubiconResult = {
+  state: RubiconState;
+  activeLevel: number;
+  nextWholeDollar: number;
+  previousWholeDollar: number;
+
+  greenPre: boolean;
+  greenPost: boolean;
+  green: boolean;
+  orange: boolean;
+  parabolic: boolean;
+  fail: boolean;
+
+  rvolGreen: number;
+  momGreen: number;
+  spreadGreen: number;
+};
+
+export type ScannerRow = {
+  symbol: string;
+  name?: string;
+
+  price: number;
   bid: number;
   ask: number;
+  spreadPct: number;
+
+  volume: number;
+  averageVolume: number;
+  rvol: number;
+
+  floatShares: number | null;
+  catalystScore: number;
+  catalystHeadline: string | null;
+
   vwap: number;
-  orh: number; // 5-min opening range high
-  orl: number; // 5-min opening range low
-  tick: number; // minimum tick size for this symbol
-  rvolCum: number;
-  rvol1m: number;
-  float: number; // shares
-  timestamp: number; // epoch ms
-}
+  openingRangeHigh: number;
+  openingRangeLow: number;
 
-export type RubiconState = "GREEN" | "YELLOW" | "ORANGE";
-
-export interface OracleResult {
-  symbol: string;
-  score: number; // 0-1 OracleScore
-  requiredScore: number;
-  passed: boolean; // score >= requiredScore AND not invalid
-  invalid: boolean;
-  invalidReasons: string[];
-  entryTrigger: number | null; // OracleEntryTrigger
-  maxEntryPrice: number | null;
-  suggestedEntry: number | null; // final SuggestedEntry per Step 17
-  components: {
-    sVwap: number;
-    sOrb: number;
-    sRvol: number;
-    sMom: number;
-    momentum: number;
-    acceleration: number;
-    vwapDistance: number;
-    orbBreakout: number;
-    blendedRvol: number;
-    spreadPct: number;
-  };
-  catalystScore: number;
-  timestamp: number;
-}
-
-export interface RubiconResult {
-  symbol: string;
-  state: RubiconState;
-  level: number; // L, active whole-dollar level
-  distanceToLevel: number; // signed, in price terms (L - M)
-  floatScore: number;
-  floatValid: boolean;
-  failed: boolean;
-  failReasons: string[];
-  isParabolic: boolean;
-  components: {
-    spreadPct: number;
-    blendedRvol: number;
-    momentum: number;
-    acceleration: number;
-  };
-  catalystScore: number;
-  timestamp: number;
-}
-
-export interface ScannerRow {
-  symbol: string;
-  price: number; // midpoint
-  quote: Quote;
+  momentum: MomentumResult;
   oracle: OracleResult;
   rubicon: RubiconResult;
-}
+};
