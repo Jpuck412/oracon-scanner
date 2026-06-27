@@ -1,181 +1,184 @@
-import { clip01, midpoint, spreadPct, spreadMax, blendedRVOL, momentum } from "./marketMath";
-import { getMomentumWindow } from "./priceHistory";
-import type { Quote, RubiconResult, RubiconState } from "@/types/scanner";
+import { clip01, midpoint, spreadMax, spreadPct } from "@/lib/marketMath";
+import type { RubiconResult, RubiconState } from "@/types/scanner";
 
-/**
- * Full Rubicon 3-Light State Machine — long-only whole-dollar breakout,
- * $0.50-$10.00 low-float universe. Every constant matches the solved
- * formula exactly.
- */
+export type RubiconInput = {
+  bid: number;
+  ask: number;
+  last?: number;
 
-export async function evaluateRubicon(
-  quote: Quote,
-  catalystScore: number
-): Promise<RubiconResult> {
-  const C = clip01(catalystScore);
-  const failReasons: string[] = [];
+  rvol: number;
+  catalystScore: number;
+  floatShares: number | null;
 
-  const M = midpoint(quote);
-  const SpreadPct = spreadPct(quote);
-  const F = quote.float;
+  mom: number;
+  acceleration: number;
 
-  const window = getMomentumWindow(quote.symbol, quote.timestamp);
-  if (!window) {
-    return buildFailedResult(quote, C, SpreadPct, ["Insufficient price history for momentum calculation"]);
+  previousState?: RubiconState;
+  previousActiveLevel?: number | null;
+};
+
+export const floatScore = (floatShares: number | null): number => {
+  if (!floatShares || floatShares <= 0) return 0;
+  return clip01((50_000_000 - floatShares) / 48_000_000);
+};
+
+export const floatValid = (floatShares: number | null): boolean =>
+  !!floatShares && floatShares >= 500_000 && floatShares <= 50_000_000;
+
+export const zPre = (L: number): number =>
+  Math.min(0.12, Math.max(0.025, 0.035 * L));
+
+export const zPost = (L: number, C: number): number =>
+  Math.min(0.1, Math.max(0.015, (0.02 + 0.005 * C) * L));
+
+export const zFail = (L: number): number =>
+  Math.min(0.06, Math.max(0.012, 0.015 * L));
+
+export const rvolGreen = (C: number, floatShares: number | null): number => {
+  const sf = floatScore(floatShares);
+
+  return Math.max(
+    1.4,
+    2.8 * (1 - 0.35 * C) * (1 - 0.15 * sf)
+  );
+};
+
+export const momGreen = (C: number, floatShares: number | null): number => {
+  const sf = floatScore(floatShares);
+
+  return Math.max(
+    0.2,
+    0.45 * (1 - 0.25 * C) * (1 - 0.1 * sf)
+  );
+};
+
+export const momRetest = (C: number): number =>
+  -0.1 * (1 + 0.5 * C);
+
+export const rvolHold = (C: number, floatShares: number | null): number =>
+  0.7 * rvolGreen(C, floatShares);
+
+export const momHold = (C: number): number =>
+  0.05 * (1 - 0.2 * C);
+
+export const spreadGreen = (price: number, C: number): number =>
+  spreadMax(price) * (1 + 0.1 * C);
+
+export const spreadOrange = (price: number, C: number): number =>
+  1.5 * spreadGreen(price, C);
+
+export const computeRubicon = (x: RubiconInput): RubiconResult => {
+  const C = clip01(x.catalystScore);
+  const M = midpoint(x.bid, x.ask, x.last);
+  const spr = spreadPct(x.bid, x.ask, M);
+
+  const nextWholeDollar = Math.ceil(M);
+  const previousWholeDollar = Math.floor(M);
+
+  const previousState = x.previousState ?? "YELLOW";
+
+  let activeLevel =
+    x.previousActiveLevel ??
+    (M >= previousWholeDollar && previousWholeDollar >= 1 ? previousWholeDollar : nextWholeDollar);
+
+  if (previousState === "YELLOW") {
+    activeLevel = nextWholeDollar;
   }
 
-  const { mom: Mom, acceleration: A } = momentum({
-    m: M,
-    m1: window.m1,
-    m3: window.m3,
-    m5: window.m5,
-    spreadPctValue: SpreadPct,
-  });
+  const rg = rvolGreen(C, x.floatShares);
+  const mg = momGreen(C, x.floatShares);
+  const sg = spreadGreen(M, C);
 
-  const R = blendedRVOL(quote.rvolCum, quote.rvol1m);
+  const preDistance = activeLevel - M;
+  const postDistance = M - activeLevel;
 
-  // STEP 1-2: Float score + validity
-  const FloatScore = clip01((50_000_000 - F) / 48_000_000);
-  const FloatValid = F >= 500_000 && F <= 50_000_000;
-
-  // Active whole-dollar level: nearest level at or above current price
-  const L = Number.isInteger(M) ? M : Math.ceil(M);
-
-  // STEP 3: Level zones
-  const Z_Pre = Math.min(0.12, Math.max(0.025, 0.035 * L));
-  const Z_Post = Math.min(0.1, Math.max(0.015, (0.02 + 0.005 * C) * L));
-  const Z_Fail = Math.min(0.06, Math.max(0.012, 0.015 * L));
-
-  // STEP 4: Green thresholds
-  const RVOL_Green = Math.max(1.4, 2.8 * (1 - 0.35 * C) * (1 - 0.15 * FloatScore));
-  const Mom_Green = Math.max(0.2, 0.45 * (1 - 0.25 * C) * (1 - 0.1 * FloatScore));
-  const Mom_Retest = -0.1 * (1 + 0.5 * C);
-
-  // STEP 5: Spread thresholds
-  const SpreadMaxVal = spreadMax(M);
-  const SpreadGreen = SpreadMaxVal * (1 + 0.1 * C);
-  const SpreadOrange = 1.5 * SpreadGreen;
-
-  // STEP 6: Pre-breakout GREEN
-  const distToLevel = L - M;
-  const GREEN_PRE =
+  const greenPre =
     M >= 0.2 &&
-    M <= 10.0 &&
-    FloatValid &&
-    distToLevel >= 0 &&
-    distToLevel <= Z_Pre &&
-    R >= RVOL_Green &&
-    Mom >= Mom_Green &&
-    SpreadPct <= SpreadGreen;
+    M <= 10 &&
+    floatValid(x.floatShares) &&
+    preDistance >= 0 &&
+    preDistance <= zPre(activeLevel) &&
+    x.rvol >= rg &&
+    x.mom >= mg &&
+    spr <= sg;
 
-  // STEP 7: Post-breakout GREEN (retest)
-  const distPastLevel = M - L;
-  const GREEN_POST =
+  const greenPost =
     M >= 0.2 &&
-    M <= 10.0 &&
-    FloatValid &&
-    distPastLevel >= 0 &&
-    distPastLevel <= Z_Post &&
-    R >= RVOL_Green &&
-    Mom >= Mom_Retest &&
-    A >= -0.5 &&
-    SpreadPct <= SpreadGreen;
+    M <= 10 &&
+    floatValid(x.floatShares) &&
+    postDistance >= 0 &&
+    postDistance <= zPost(activeLevel, C) &&
+    x.rvol >= rg &&
+    x.mom >= momRetest(C) &&
+    x.acceleration >= -0.5 &&
+    spr <= sg;
 
-  // STEP 8: Final GREEN
-  const GREEN = GREEN_PRE || GREEN_POST;
+  const green = greenPre || greenPost;
 
-  // STEP 9: ORANGE base
-  const RVOL_Hold = 0.7 * RVOL_Green;
-  const Mom_Hold = 0.05 * (1 - 0.2 * C);
-  const ORANGE_BASE =
+  const parabolic =
+    ((M - activeLevel) / activeLevel >= 0.08 + 0.03 * C) ||
+    x.mom >= 2.25 + 0.75 * C ||
+    x.acceleration >= 1.25;
+
+  const orangeBase =
     M >= 0.2 &&
-    M <= 10.0 &&
-    SpreadPct <= SpreadOrange &&
-    M > L + Z_Post &&
-    (R >= RVOL_Hold || Mom >= Mom_Hold);
+    M <= 10 &&
+    spr <= spreadOrange(M, C) &&
+    M > activeLevel + zPost(activeLevel, C) &&
+    (x.rvol >= rvolHold(C, x.floatShares) || x.mom >= momHold(C));
 
-  // STEP 10: Parabolic override
-  const PARABOLIC =
-    (M - L) / L >= 0.08 + 0.03 * C || Mom >= 2.25 + 0.75 * C || A >= 1.25;
+  const orange = orangeBase || parabolic;
 
-  // STEP 11: Final ORANGE
-  const ORANGE = ORANGE_BASE || PARABOLIC;
+  const universeFail =
+    M < 0.2 ||
+    M > 10 ||
+    !floatValid(x.floatShares);
 
-  // STEP 12: Failure conditions
-  const UNIVERSE_FAIL = M < 0.2 || M > 10.0 || F < 500_000 || F > 50_000_000;
-  if (UNIVERSE_FAIL) failReasons.push("Outside universe bounds (price or float)");
+  const hasBroken = M >= activeLevel;
 
-  let FAIL_PRE = false;
-  let FAIL_POST = false;
+  const failPre =
+    M < activeLevel - zPre(activeLevel) ||
+    x.rvol < 0.7 * rg ||
+    x.mom < -0.25 ||
+    spr > spreadOrange(M, C);
 
-  if (M < L) {
-    FAIL_PRE =
-      M < L - Z_Pre || R < 0.7 * RVOL_Green || Mom < -0.25 || SpreadPct > SpreadOrange;
-    if (FAIL_PRE) failReasons.push("Pre-breakout setup failed (distance/volume/momentum/spread)");
-  } else {
-    FAIL_POST =
-      M < L - Z_Fail || R < 0.6 * RVOL_Green || Mom < -0.4 || SpreadPct > SpreadOrange;
-    if (FAIL_POST) failReasons.push("Post-breakout setup failed (pulled back too far)");
-  }
+  const failPost =
+    M < activeLevel - zFail(activeLevel) ||
+    x.rvol < 0.6 * rg ||
+    x.mom < -0.4 ||
+    spr > spreadOrange(M, C);
 
-  const FAIL = UNIVERSE_FAIL || FAIL_PRE || FAIL_POST;
+  const fail =
+    universeFail ||
+    (!hasBroken && failPre) ||
+    (hasBroken && failPost);
 
-  // STEP 13: Final state — FAIL beats ORANGE beats GREEN, default YELLOW
-  let state: RubiconState;
-  if (FAIL) {
-    state = "YELLOW";
-  } else if (ORANGE) {
-    state = "ORANGE";
-  } else if (GREEN) {
-    state = "GREEN";
-  } else {
-    state = "YELLOW";
+  let state: RubiconResult["state"];
+
+  if (fail) state = "YELLOW";
+  else if (orange) state = "ORANGE";
+  else if (green) state = "GREEN";
+  else state = "YELLOW";
+
+  if (state === "YELLOW") {
+    activeLevel = nextWholeDollar;
   }
 
   return {
-    symbol: quote.symbol,
     state,
-    level: L,
-    distanceToLevel: L - M,
-    floatScore: FloatScore,
-    floatValid: FloatValid,
-    failed: FAIL,
-    failReasons,
-    isParabolic: PARABOLIC,
-    components: {
-      spreadPct: SpreadPct,
-      blendedRvol: R,
-      momentum: Mom,
-      acceleration: A,
-    },
-    catalystScore: C,
-    timestamp: quote.timestamp,
-  };
-}
+    activeLevel,
+    nextWholeDollar,
+    previousWholeDollar,
 
-function buildFailedResult(
-  quote: Quote,
-  C: number,
-  spreadPctVal: number,
-  reasons: string[]
-): RubiconResult {
-  return {
-    symbol: quote.symbol,
-    state: "YELLOW",
-    level: Math.ceil(midpoint(quote)),
-    distanceToLevel: 0,
-    floatScore: 0,
-    floatValid: false,
-    failed: true,
-    failReasons: reasons,
-    isParabolic: false,
-    components: {
-      spreadPct: spreadPctVal,
-      blendedRvol: 0,
-      momentum: 0,
-      acceleration: 0,
-    },
-    catalystScore: C,
-    timestamp: quote.timestamp,
+    greenPre,
+    greenPost,
+    green,
+    orange,
+    parabolic,
+    fail,
+
+    rvolGreen: rg,
+    momGreen: mg,
+    spreadGreen: sg
   };
-}
+};
