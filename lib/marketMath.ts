@@ -31,10 +31,25 @@ export const velocity = (
   direction: 1 | -1 = 1
 ): number => {
   if (currentPrice <= 0 || pastPrice <= 0 || minutes <= 0) return 0;
-  return direction * 100 * (Math.log(currentPrice) - Math.log(pastPrice)) / minutes;
+
+  return (
+    direction *
+    100 *
+    (Math.log(currentPrice) - Math.log(pastPrice)) /
+    minutes
+  );
 };
 
-export const computeMomentum = params => {
+export type MomentumInput = {
+  currentPrice: number;
+  m1: number;
+  m3: number;
+  m5: number;
+  spreadPctNow: number;
+  direction?: 1 | -1;
+};
+
+export const computeMomentum = (params: MomentumInput): MomentumResult => {
   const { currentPrice, m1, m3, m5, spreadPctNow, direction = 1 } = params;
 
   const v1 = velocity(currentPrice, m1, 1, direction);
@@ -54,34 +69,25 @@ export const computeMomentum = params => {
   return { v1, v3, v5, acceleration, mom };
 };
 
-export type MomentumInput = {
-  currentPrice: number;
-  m1: number;
-  m3: number;
-  m5: number;
-  spreadPctNow: number;
-  direction?: 1 | -1;
-};
-
 export const computeDailyVwap = (bars: TradierTimeSaleBar[]): number => {
-  let pv = 0;
-  let vol = 0;
+  let priceVolume = 0;
+  let volume = 0;
 
   for (const b of bars) {
     const v = safeNumber(b.volume);
     if (v <= 0) continue;
 
-    const px =
+    const price =
       safeNumber(b.vwap) ||
       safeNumber(b.close) ||
       safeNumber(b.price) ||
       (safeNumber(b.high) + safeNumber(b.low) + safeNumber(b.close)) / 3;
 
-    pv += px * v;
-    vol += v;
+    priceVolume += price * v;
+    volume += v;
   }
 
-  return vol > 0 ? pv / vol : 0;
+  return volume > 0 ? priceVolume / volume : 0;
 };
 
 export const computeOpeningRange = (
