@@ -1,111 +1,132 @@
-/**
- * Rolling in-memory price history buffer, keyed by ticker symbol.
- * Supplies M1 / M3 / M5 (midpoints N minutes ago) to the momentum
- * formula in marketMath.ts. Each engine tick should call recordTick()
- * once per symbol, then getMidpointMinutesAgo() to pull historical values.
- *
- * NOTE: This is in-memory only. It resets on server restart/redeploy.
- * That's expected for a premarket/intraday scanner — history doesn't
- * need to persist across sessions, only within a single trading session.
- */
+import {
+  computeDailyVwap,
+  computeOpeningRange,
+  getCloseNMinutesAgo,
+  midpoint,
+  safeNumber
+} from "@/lib/marketMath";
+import { getTradierTimesales } from "@/lib/tradierClient";
+import type {
+  IntradayContext,
+  TradierQuote,
+  TradierTimeSaleBar
+} from "@/types/scanner";
 
-interface PricePoint {
-  timestamp: number; // epoch ms
-  midpoint: number;
-}
+const easternParts = (d = new Date()) => {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/New_York",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false
+  }).formatToParts(d);
 
-// How long to retain history per symbol before pruning old points.
-const RETENTION_MS = 6 * 60 * 1000; // 6 minutes (slightly above the 5m window we need)
+  const get = (type: string) =>
+    parts.find((p) => p.type === type)?.value ?? "00";
 
-// In-memory store: symbol -> chronological array of price points
-const history = new Map<string, PricePoint[]>();
+  return {
+    year: get("year"),
+    month: get("month"),
+    day: get("day"),
+    hour: get("hour"),
+    minute: get("minute")
+  };
+};
 
-/**
- * Record a new midpoint price tick for a symbol.
- * Call this once per engine tick/poll cycle per symbol.
- */
-export function recordTick(symbol: string, midpoint: number, timestamp: number = Date.now()): void {
-  const key = symbol.toUpperCase();
-  const existing = history.get(key) ?? [];
+export const todayEasternYmd = (): string => {
+  const p = easternParts();
+  return `${p.year}-${p.month}-${p.day}`;
+};
 
-  existing.push({ timestamp, midpoint });
+export const nowEasternHm = (): string => {
+  const p = easternParts();
+  return `${p.hour}:${p.minute}`;
+};
 
-  // Prune anything older than RETENTION_MS to prevent unbounded memory growth
-  const cutoff = timestamp - RETENTION_MS;
-  const pruned = existing.filter((p) => p.timestamp >= cutoff);
+export const todaySessionRange = () => {
+  const ymd = todayEasternYmd();
 
-  history.set(key, pruned);
-}
+  return {
+    start: `${ymd} 09:30`,
+    end: `${ymd} ${nowEasternHm()}`
+  };
+};
 
-/**
- * Get the midpoint price closest to `minutesAgo` minutes before now.
- * Returns null if there isn't enough history yet (e.g. first few minutes
- * after market open, or a symbol just added to the scanner).
- *
- * Uses closest-match rather than exact-match since tick arrival times
- * are irregular (depends on quote provider polling interval).
- */
-export function getMidpointMinutesAgo(
-  symbol: string,
-  minutesAgo: number,
-  now: number = Date.now()
-): number | null {
-  const key = symbol.toUpperCase();
-  const points = history.get(key);
+const elapsedRegularMinutes = (): number => {
+  const p = easternParts();
+  const h = Number(p.hour);
+  const m = Number(p.minute);
 
-  if (!points || points.length === 0) return null;
+  const now = h * 60 + m;
+  const open = 9 * 60 + 30;
 
-  const targetTime = now - minutesAgo * 60 * 1000;
+  return Math.min(390, Math.max(1, now - open));
+};
 
-  // Find the point whose timestamp is closest to targetTime
-  let closest: PricePoint | null = null;
-  let smallestDiff = Infinity;
+export const getIntradayBars = async (
+  symbol: string
+): Promise<TradierTimeSaleBar[]> => {
+  const { start, end } = todaySessionRange();
 
-  for (const point of points) {
-    const diff = Math.abs(point.timestamp - targetTime);
-    if (diff < smallestDiff) {
-      smallestDiff = diff;
-      closest = point;
-    }
-  }
+  const bars = await getTradierTimesales(symbol, start, end, "1min", "open");
 
-  // Guard: if the closest point we have is more than 90 seconds off
-  // from the requested time, treat it as insufficient history rather
-  // than silently using a stale/wrong value.
-  const MAX_ACCEPTABLE_DRIFT_MS = 90 * 1000;
-  if (!closest || smallestDiff > MAX_ACCEPTABLE_DRIFT_MS) return null;
+  return bars
+    .filter((b) => safeNumber(b.close) > 0 && safeNumber(b.volume) >= 0)
+    .sort((a, b) => String(a.time).localeCompare(String(b.time)));
+};
 
-  return closest.midpoint;
-}
+export const buildIntradayContext = (
+  quote: TradierQuote,
+  bars: TradierTimeSaleBar[]
+): IntradayContext => {
+  const bid = safeNumber(quote.bid);
+  const ask = safeNumber(quote.ask);
+  const last = safeNumber(quote.last);
 
-/**
- * Convenience helper: pulls M1, M3, M5 in one call for the momentum formula.
- * Returns null if ANY of the three windows lack sufficient history —
- * callers should treat that symbol as "not yet ready" rather than
- * computing momentum off incomplete data.
- */
-export function getMomentumWindow(
-  symbol: string,
-  now: number = Date.now()
-): { m1: number; m3: number; m5: number } | null {
-  const m1 = getMidpointMinutesAgo(symbol, 1, now);
-  const m3 = getMidpointMinutesAgo(symbol, 3, now);
-  const m5 = getMidpointMinutesAgo(symbol, 5, now);
+  const current = midpoint(bid, ask, last);
 
-  if (m1 === null || m3 === null || m5 === null) return null;
+  const cleanBars =
+    bars.length > 0
+      ? bars
+      : [
+          {
+            time: new Date().toISOString(),
+            open: safeNumber(quote.open, current),
+            high: safeNumber(quote.high, current),
+            low: safeNumber(quote.low, current),
+            close: current,
+            volume: safeNumber(quote.volume)
+          }
+        ];
 
-  return { m1, m3, m5 };
-}
+  const vwap = computeDailyVwap(cleanBars) || current;
+  const openingRange = computeOpeningRange(cleanBars, 5);
 
-/**
- * Remove a symbol entirely from history (e.g. when it drops off the scanner).
- * Prevents unbounded memory growth as symbols rotate in/out of the universe.
- */
-export function clearSymbol(symbol: string): void {
-  history.delete(symbol.toUpperCase());
-}
+  const cumulativeVolume = cleanBars.reduce(
+    (sum, b) => sum + safeNumber(b.volume),
+    0
+  );
 
-/** Debug/ops helper: how many symbols are currently being tracked */
-export function trackedSymbolCount(): number {
-  return history.size;
-}
+  const oneMinuteVolume = safeNumber(cleanBars.at(-1)?.volume);
+
+  const avgVol = safeNumber(quote.average_volume, safeNumber(quote.volume, 1));
+  const elapsed = elapsedRegularMinutes();
+
+  const expectedCumVol = Math.max(1, avgVol * (elapsed / 390));
+  const expectedOneMinVol = Math.max(1, avgVol / 390);
+
+  return {
+    vwap,
+    openingRangeHigh: openingRange.high || safeNumber(quote.high, current),
+    openingRangeLow: openingRange.low || safeNumber(quote.low, current),
+    rvolCumulative: cumulativeVolume / expectedCumVol,
+    rvolOneMinute: oneMinuteVolume / expectedOneMinVol,
+    cumulativeVolume,
+    oneMinuteVolume,
+    m1: getCloseNMinutesAgo(cleanBars, 1, current),
+    m3: getCloseNMinutesAgo(cleanBars, 3, current),
+    m5: getCloseNMinutesAgo(cleanBars, 5, current)
+  };
+};
