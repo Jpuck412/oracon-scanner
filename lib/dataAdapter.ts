@@ -1,5 +1,10 @@
 import { scoreCatalystFromNews } from "@/lib/catalyst";
-import { computeMomentum, midpoint, safeNumber, spreadPct } from "@/lib/marketMath";
+import {
+  computeMomentum,
+  midpoint,
+  safeNumber,
+  spreadPct
+} from "@/lib/marketMath";
 import { computeOracle } from "@/lib/oracleEngine";
 import { buildIntradayContext, getIntradayBars } from "@/lib/priceHistory";
 import { computeRubicon } from "@/lib/rubiconEngine";
@@ -12,11 +17,22 @@ import type {
   TradierQuote
 } from "@/types/scanner";
 
+class FmpApiError extends Error {
+  status: number;
+  body: string;
+
+  constructor(status: number, body: string) {
+    super(`FMP API error ${status}: ${body}`);
+    this.status = status;
+    this.body = body;
+  }
+}
+
 const FMP_BASE_URL =
   process.env.FMP_BASE_URL || "https://financialmodelingprep.com/stable";
 
 const getFmpKey = (): string => {
-  const key = process.env.FMPKEY;
+  const key = process.env.FMPKEY?.trim();
 
   if (!key) {
     throw new Error("Missing FMPKEY environment variable.");
@@ -44,46 +60,101 @@ const fmpFetch = async <T>(
   });
 
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`FMP API error ${res.status}: ${text}`);
+    const body = await res.text();
+    throw new FmpApiError(res.status, body);
   }
 
   return res.json() as Promise<T>;
 };
 
-export const getFmpGainers = async (): Promise<FmpGainer[]> => {
-  const data = await fmpFetch<FmpGainer[]>("/biggest-gainers");
+const normalizeSymbol = (s: string): string =>
+  s.trim().toUpperCase();
 
-  return Array.isArray(data) ? data : [];
+const envSymbols = (): string[] => {
+  const raw = process.env.SCANNER_SYMBOLS ?? "";
+
+  return raw
+    .split(",")
+    .map(normalizeSymbol)
+    .filter(Boolean);
 };
 
-export const getFmpFloat = async (
+export const getFmpGainersSafe = async (): Promise<FmpGainer[]> => {
+  try {
+    const data = await fmpFetch<FmpGainer[]>("/biggest-gainers");
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+};
+
+export const getUniverseSymbols = async (
+  limit: number
+): Promise<string[]> => {
+  const manualSymbols = envSymbols();
+
+  const fmpGainers = await getFmpGainersSafe();
+
+  const fmpSymbols = fmpGainers
+    .map((g) => normalizeSymbol(g.symbol))
+    .filter(Boolean);
+
+  const combined = [...fmpSymbols, ...manualSymbols];
+
+  const unique = Array.from(new Set(combined));
+
+  if (unique.length === 0) {
+    throw new Error(
+      [
+        "No scanner symbols available.",
+        "FMP /biggest-gainers is blocked by your subscription or returned empty.",
+        "Set SCANNER_SYMBOLS in your environment, for example:",
+        "SCANNER_SYMBOLS=HOLO,PEGY,SOUN,BBAI,MLGO"
+      ].join(" ")
+    );
+  }
+
+  return unique.slice(0, limit * 2);
+};
+
+export const getFmpFloatSafe = async (
   symbol: string
 ): Promise<FmpFloatResponse | null> => {
-  const data = await fmpFetch<FmpFloatResponse[] | FmpFloatResponse>(
-    "/shares-float",
-    {
-      symbol
-    }
-  );
+  try {
+    const data = await fmpFetch<FmpFloatResponse[] | FmpFloatResponse>(
+      "/shares-float",
+      { symbol }
+    );
 
-  if (Array.isArray(data)) return data[0] ?? null;
+    if (Array.isArray(data)) return data[0] ?? null;
 
-  return data ?? null;
+    return data ?? null;
+  } catch {
+    return null;
+  }
 };
 
-export const getFmpLatestStockNews = async (
-  limit = 500
+export const getFmpNewsSafe = async (
+  symbols: string[]
 ): Promise<FmpNewsItem[]> => {
-  const data = await fmpFetch<FmpNewsItem[]>("/news/stock-latest", {
-    page: 0,
-    limit
-  });
+  try {
+    const cleanSymbols = symbols
+      .map(normalizeSymbol)
+      .filter(Boolean)
+      .slice(0, 100);
 
-  return Array.isArray(data) ? data : [];
+    if (cleanSymbols.length === 0) return [];
+
+    const data = await fmpFetch<FmpNewsItem[]>("/news/stock", {
+      symbols: cleanSymbols.join(","),
+      limit: 500
+    });
+
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
 };
-
-const normalizeSymbol = (s: string): string => s.trim().toUpperCase();
 
 const mapQuotes = (quotes: TradierQuote[]) => {
   const map = new Map<string, TradierQuote>();
@@ -123,19 +194,24 @@ const groupNewsBySymbol = (
   return map;
 };
 
+const fallbackFloatShares = (): number | null => {
+  const n = Number(process.env.UNKNOWN_FLOAT_SHARES ?? 0);
+
+  if (Number.isFinite(n) && n >= 500_000 && n <= 50_000_000) {
+    return n;
+  }
+
+  return null;
+};
+
 export const buildScannerRows = async (
   limit = 40
 ): Promise<ScannerRow[]> => {
-  const gainers = await getFmpGainers();
-
-  const symbols = gainers
-    .map((g) => normalizeSymbol(g.symbol))
-    .filter(Boolean)
-    .slice(0, limit * 2);
+  const symbols = await getUniverseSymbols(limit);
 
   const [quotes, latestNews] = await Promise.all([
     getTradierQuotes(symbols),
-    getFmpLatestStockNews(500)
+    getFmpNewsSafe(symbols)
   ]);
 
   const quoteMap = mapQuotes(quotes);
@@ -156,16 +232,22 @@ export const buildScannerRows = async (
       if (price < 0.2 || price > 10) return null;
 
       const [floatData, bars] = await Promise.all([
-        getFmpFloat(symbol).catch(() => null),
+        getFmpFloatSafe(symbol),
         getIntradayBars(symbol).catch(() => [])
       ]);
 
-      const floatShares =
+      const reportedFloat =
         safeNumber(floatData?.floatShares) ||
         safeNumber(floatData?.freeFloat) ||
-        null;
+        0;
+
+      const floatShares =
+        reportedFloat > 0
+          ? reportedFloat
+          : fallbackFloatShares();
 
       const ctx = buildIntradayContext(quote, bars);
+
       const spr = spreadPct(bid, ask, price);
 
       const momentum = computeMomentum({
